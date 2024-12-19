@@ -86,6 +86,8 @@ typedef struct wsi_display_connector {
    struct wsi_display           *wsi;
    uint32_t                     id;
    uint32_t                     crtc_id;
+   uint32_t                     origin_fb_id;
+   drmModeModeInfo              origin_mode_info;
    char                         *name;
    bool                         connected;
    bool                         active;
@@ -308,7 +310,11 @@ wsi_display_alloc_connector(struct wsi_display *wsi,
    connector->wsi = wsi;
    connector->active = false;
    /* XXX use EDID name */
-   connector->name = "monitor";
+   connector->name = vk_zalloc(wsi->alloc, sizeof(char) * 8, 8, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
+   if (!connector->name) {
+       vk_free(wsi->alloc, connector);
+       return NULL;
+   }
    list_inithead(&connector->display_modes);
    return connector;
 }
@@ -375,6 +381,27 @@ wsi_display_get_connector(struct wsi_device *wsi_device,
          return NULL;
       }
    }
+
+   int buf_size = 16;
+   char* name_buf = NULL;
+   do{
+       name_buf = 
+          vk_zalloc(wsi->alloc, sizeof (char)*buf_size,
+                    8, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
+
+       int count = snprintf(name_buf, buf_size,
+               "%s-%d",
+               drmModeGetConnectorTypeName(drm_connector->connector_type),
+               drm_connector->connector_type_id);
+
+       if (count >= buf_size) {
+           vk_free(wsi->alloc, name_buf);
+           buf_size = count + 1;
+           continue;
+       }
+   } while (name_buf == NULL);
+   vk_free(wsi->alloc, connector->name);
+   connector->name = name_buf;
 
    drmModeFreeConnector(drm_connector);
 
@@ -1949,6 +1976,9 @@ _wsi_display_queue_next(struct wsi_swapchain *drv_chain)
          }
 
          /* XXX allow setting of position */
+         drmModeCrtc* crtc = drmModeGetCrtc(wsi->fd, connector->crtc_id);
+         connector->origin_fb_id = crtc->buffer_id;
+         connector->origin_mode_info = crtc->mode;
          ret = drmModeSetCrtc(wsi->fd, connector->crtc_id,
                               image->fb_id, 0, 0,
                               &connector->id, 1,
@@ -2345,6 +2375,13 @@ wsi_display_finish_wsi(struct wsi_device *wsi_device,
          wsi_for_each_display_mode(mode, connector) {
             vk_free(wsi->alloc, mode);
          }
+         if (connector->origin_fb_id != 0) {
+             uint32_t connector_id = connector->id;
+             drmModeModeInfo mode_info = connector->origin_mode_info;
+             int res = drmModeSetCrtc(wsi->fd, connector->crtc_id, connector->origin_fb_id, 0, 0, &connector_id, 1, &mode_info);
+             assert(res == 0);
+         }
+         vk_free(wsi->alloc, connector->name);
          vk_free(wsi->alloc, connector);
       }
 
